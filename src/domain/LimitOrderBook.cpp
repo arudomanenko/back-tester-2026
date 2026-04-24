@@ -53,40 +53,38 @@ void LimitOrderBook<QueueT>::onEvent(const MarketDataEvent &event) {
   }
 
   const auto instrument_id = *resolved_instrument_id;
-  updateOrderRouting(event, instrument_id);
-
   if (event.action == 'R') {
-    clearInstrumentOrders(instrument_id);
+    clearInstrumentOrderRoutes(instrument_id);
+  } else {
+    rememberOrderRoute(event, instrument_id);
   }
 
-  registerInstrument(instrument_id);
+  const auto &route = registerInstrument(instrument_id);
 
   auto routed_event = event;
   routed_event.hd.instrument_id = instrument_id;
-  instrument_id_to_thread_[instrument_id]->putEvent(routed_event);
+  route.thread->putEvent(routed_event, route.lob.get());
 }
 
 template <typename QueueT> void LimitOrderBook<QueueT>::onEndEvent() {
   std::unordered_set<const LobsServingThread *> stopped;
-  for (const auto &[_, thread] : instrument_id_to_thread_) {
-    if (stopped.insert(thread.get()).second) {
-      thread->stop();
+  for (const auto &[_, route] : instrument_routes_) {
+    if (stopped.insert(route.thread.get()).second) {
+      route.thread->stop();
     }
   }
 }
 
-template <typename QueueT>
-LobConsistentView LimitOrderBook<QueueT>::freeze() {
-
+template <typename QueueT> LobConsistentView LimitOrderBook<QueueT>::freeze() {
 
   std::unique_lock<std::mutex> freeze_lock(freeze_m_);
 
   std::vector<LobsServingThread::Sptr> unique_threads;
   std::unordered_set<const LobsServingThread *> seen;
-  unique_threads.reserve(instrument_id_to_thread_.size());
-  for (const auto &[_, thread] : instrument_id_to_thread_) {
-    if (seen.insert(thread.get()).second) {
-      unique_threads.push_back(thread);
+  unique_threads.reserve(instrument_routes_.size());
+  for (const auto &[_, route] : instrument_routes_) {
+    if (seen.insert(route.thread.get()).second) {
+      unique_threads.push_back(route.thread);
     }
   }
 
@@ -97,18 +95,22 @@ LobConsistentView LimitOrderBook<QueueT>::freeze() {
 }
 
 template <typename QueueT>
-void LimitOrderBook<QueueT>::registerInstrument(const InstrumentId instrument_id) {
-  if (instrument_to_lob_.count(instrument_id) != 0) {
-    return;
+const typename LimitOrderBook<QueueT>::InstrumentRoute &
+LimitOrderBook<QueueT>::registerInstrument(const InstrumentId instrument_id) {
+  if (const auto it = instrument_routes_.find(instrument_id);
+      it != instrument_routes_.end()) {
+    return it->second;
   }
 
   auto lob = std::make_shared<Lob>();
-  instrument_to_lob_.emplace(instrument_id, lob);
-
   auto thread = acquireLeastLoadedThread();
   thread->attachLob(instrument_id, lob);
   work_threads_.push(thread);
-  instrument_id_to_thread_[instrument_id] = thread;
+
+  instrument_to_lob_.emplace(instrument_id, lob);
+  const auto insert_result =
+      instrument_routes_.emplace(instrument_id, InstrumentRoute{lob, thread});
+  return insert_result.first->second;
 }
 
 template <typename QueueT>
@@ -146,6 +148,20 @@ LimitOrderBook<QueueT>::getAsks(const InstrumentId instrument_id) const {
 }
 
 template <typename QueueT>
+BidsBookMap LimitOrderBook<QueueT>::getTopBids(const InstrumentId instrument_id,
+                                               const std::size_t depth) const {
+  const auto lob = findLob(instrument_id);
+  return lob ? lob->getTopBids(depth) : BidsBookMap{};
+}
+
+template <typename QueueT>
+AsksBookMap LimitOrderBook<QueueT>::getTopAsks(const InstrumentId instrument_id,
+                                               const std::size_t depth) const {
+  const auto lob = findLob(instrument_id);
+  return lob ? lob->getTopAsks(depth) : AsksBookMap{};
+}
+
+template <typename QueueT>
 BestQuote
 LimitOrderBook<QueueT>::getBestBid(const InstrumentId instrument_id) const {
   const auto lob = findLob(instrument_id);
@@ -160,8 +176,10 @@ LimitOrderBook<QueueT>::getBestAsk(const InstrumentId instrument_id) const {
 }
 
 template <typename QueueT>
-Quantity LimitOrderBook<QueueT>::getVolumeAtPrice(
-    const InstrumentId instrument_id, const char side, const Price price) const {
+Quantity
+LimitOrderBook<QueueT>::getVolumeAtPrice(const InstrumentId instrument_id,
+                                         const char side,
+                                         const Price price) const {
   const auto lob = findLob(instrument_id);
   return lob ? lob->getVolumeAtPrice(side, price) : Quantity{0};
 }
@@ -182,6 +200,28 @@ InstrumentIdToAsksBook LimitOrderBook<QueueT>::getAllAsks() const {
   result.reserve(instrument_to_lob_.size());
   for (const auto &[instrument_id, lob] : instrument_to_lob_) {
     result.emplace(instrument_id, lob->getAsks());
+  }
+  return result;
+}
+
+template <typename QueueT>
+InstrumentIdToBidsBook
+LimitOrderBook<QueueT>::getAllTopBids(const std::size_t depth) const {
+  InstrumentIdToBidsBook result;
+  result.reserve(instrument_to_lob_.size());
+  for (const auto &[instrument_id, lob] : instrument_to_lob_) {
+    result.emplace(instrument_id, lob->getTopBids(depth));
+  }
+  return result;
+}
+
+template <typename QueueT>
+InstrumentIdToAsksBook
+LimitOrderBook<QueueT>::getAllTopAsks(const std::size_t depth) const {
+  InstrumentIdToAsksBook result;
+  result.reserve(instrument_to_lob_.size());
+  for (const auto &[instrument_id, lob] : instrument_to_lob_) {
+    result.emplace(instrument_id, lob->getTopAsks(depth));
   }
   return result;
 }
@@ -227,8 +267,30 @@ InstrumentIdToExecStats LimitOrderBook<QueueT>::getAllFillStats() const {
 }
 
 template <typename QueueT>
-std::optional<InstrumentId>
-LimitOrderBook<QueueT>::resolveInstrumentId(const MarketDataEvent &event) const {
+std::size_t LimitOrderBook<QueueT>::getActiveWorkersCount() const {
+  return getWorkerInstrumentLoads().size();
+}
+
+template <typename QueueT>
+std::vector<std::size_t>
+LimitOrderBook<QueueT>::getWorkerInstrumentLoads() const {
+  std::unordered_map<const LobsServingThread *, std::size_t> loads_by_worker;
+  loads_by_worker.reserve(instrument_routes_.size());
+  for (const auto &[_, route] : instrument_routes_) {
+    ++loads_by_worker[route.thread.get()];
+  }
+
+  std::vector<std::size_t> loads;
+  loads.reserve(loads_by_worker.size());
+  for (const auto &[_, load] : loads_by_worker) {
+    loads.push_back(load);
+  }
+  return loads;
+}
+
+template <typename QueueT>
+std::optional<InstrumentId> LimitOrderBook<QueueT>::resolveInstrumentId(
+    const MarketDataEvent &event) const {
   if (event.hd.instrument_id != 0) {
     return event.hd.instrument_id;
   }
@@ -243,32 +305,28 @@ LimitOrderBook<QueueT>::resolveInstrumentId(const MarketDataEvent &event) const 
 }
 
 template <typename QueueT>
-void LimitOrderBook<QueueT>::updateOrderRouting(const MarketDataEvent &event,
-                                                const InstrumentId instrument_id) {
-  if (event.order_id == 0) {
+void LimitOrderBook<QueueT>::rememberOrderRoute(
+    const MarketDataEvent &event, const InstrumentId instrument_id) {
+  if (event.order_id == 0 || (event.action != 'A' && event.action != 'M')) {
     return;
   }
 
-  const auto it = order_to_instrument_.find(event.order_id);
-  if (it != order_to_instrument_.end() && it->second != instrument_id) {
-    instrument_to_orders_[it->second].erase(event.order_id);
-  }
   order_to_instrument_[event.order_id] = instrument_id;
-  instrument_to_orders_[instrument_id].insert(event.order_id);
 }
 
 template <typename QueueT>
-void LimitOrderBook<QueueT>::clearInstrumentOrders(const InstrumentId instrument_id) {
-  const auto it = instrument_to_orders_.find(instrument_id);
-  if (it == instrument_to_orders_.end()) {
-    return;
+void LimitOrderBook<QueueT>::clearInstrumentOrderRoutes(
+    const InstrumentId instrument_id) {
+  auto it = order_to_instrument_.begin();
+  while (it != order_to_instrument_.end()) {
+    if (it->second == instrument_id) {
+      it = order_to_instrument_.erase(it);
+    } else {
+      ++it;
+    }
   }
-  for (const auto order_id : it->second) {
-    order_to_instrument_.erase(order_id);
-  }
-  instrument_to_orders_.erase(it);
 }
 
 template class LimitOrderBook<transport::FlatSyncedQueue>;
 template class LimitOrderBook<transport::HierarchicalSyncedQueue>;
-}
+} // namespace domain

@@ -3,11 +3,11 @@
 #include "common/BasicTypes.hpp"
 #include "common/Events.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -22,7 +22,6 @@ using AsksBookMap = std::map<Price, Quantity, std::less<Price>>;
 
 using PriceLevel = std::pair<Price, Quantity>;
 using BestQuote = std::optional<PriceLevel>;
-
 
 struct ExecStats {
   std::uint64_t count{0};
@@ -52,6 +51,8 @@ public:
 
   BidsBookMap getBids() const;
   AsksBookMap getAsks() const;
+  BidsBookMap getTopBids(std::size_t depth) const;
+  AsksBookMap getTopAsks(std::size_t depth) const;
   BestQuote getBestBid() const;
   BestQuote getBestAsk() const;
   Quantity getVolumeAtPrice(char side, Price price) const;
@@ -66,7 +67,6 @@ private:
   void adjustLevel(char side, Price price, Quantity delta);
   static void updateExecStats(ExecStats &stats, const MarketDataEvent &event);
 
-  mutable std::mutex m_;
   BidsBookMap bids_;
   AsksBookMap asks_;
   std::unordered_map<OrderId, OrderState> orders_;
@@ -74,4 +74,4 @@ private:
   ExecStats trade_stats_{};
   ExecStats fill_stats_{};
 };
-} 
+} // namespace domain

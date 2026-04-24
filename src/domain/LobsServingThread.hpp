@@ -1,29 +1,16 @@
 #pragma once
 
 #include "domain/LimitOrderBookSingleInstrument.hpp"
-#include "transport/MarketEventQueue.hpp"
-
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 
 namespace domain {
 using Lob = LimitOrderBookSingleInstrument;
 using LobSptr = Lob::Sptr;
-using InstrumentIdToLob = std::unordered_map<InstrumentId, LobSptr>;
-
-
-
-
-
-
-
-
-
-
 
 class LobsServingThread final {
 public:
@@ -46,32 +33,36 @@ public:
   void start();
   void stop();
 
-
-
-
   void attachLob(InstrumentId instrument_id, const LobSptr &lob);
 
-  void putEvent(const MarketDataEvent &event);
+  void putEvent(const MarketDataEvent &event, Lob *lob);
   std::size_t capacity() const;
-
-
-
-
 
   void pause();
   void resume();
 
 private:
-  transport::MarketEventsQueue market_events_queue_;
+  struct QueuedEvent {
+    enum class Kind { MarketData, Pause, Stop };
+
+    Kind kind{Kind::MarketData};
+    MarketDataEvent event{};
+    Lob *lob{nullptr};
+  };
+
+  void put(QueuedEvent event);
+  std::deque<QueuedEvent> popAvailable();
+
+  mutable std::mutex queue_m_;
+  std::condition_variable queue_cv_;
+  std::deque<QueuedEvent> queue_;
 
   std::thread thread_;
-  mutable std::mutex lobs_m_;
-  InstrumentIdToLob lobs_;
-
+  std::size_t capacity_{0};
 
   mutable std::mutex pause_m_;
   std::condition_variable pause_cv_;
   bool pause_requested_{false};
   bool worker_paused_{false};
 };
-}
+} // namespace domain

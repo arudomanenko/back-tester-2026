@@ -1,7 +1,6 @@
 #include "domain/LimitOrderBookSingleInstrument.hpp"
 
 #include <algorithm>
-#include <iostream>
 
 namespace domain {
 void LimitOrderBookSingleInstrument::onAdd(const MarketDataEvent &event) {
@@ -94,8 +93,6 @@ void LimitOrderBookSingleInstrument::updateExecStats(
 }
 
 void LimitOrderBookSingleInstrument::onEvent(const MarketDataEvent &event) {
-  std::unique_lock<std::mutex> lock(m_);
-
   switch (event.action) {
   case 'A':
     onAdd(event);
@@ -120,18 +117,37 @@ void LimitOrderBookSingleInstrument::onEvent(const MarketDataEvent &event) {
   }
 }
 
-BidsBookMap LimitOrderBookSingleInstrument::getBids() const {
-  std::lock_guard<std::mutex> lock(m_);
-  return bids_;
+BidsBookMap LimitOrderBookSingleInstrument::getBids() const { return bids_; }
+
+AsksBookMap LimitOrderBookSingleInstrument::getAsks() const { return asks_; }
+
+BidsBookMap
+LimitOrderBookSingleInstrument::getTopBids(const std::size_t depth) const {
+  BidsBookMap result;
+  std::size_t copied = 0;
+  for (const auto &[price, quantity] : bids_) {
+    result.emplace(price, quantity);
+    if (++copied >= depth) {
+      break;
+    }
+  }
+  return result;
 }
 
-AsksBookMap LimitOrderBookSingleInstrument::getAsks() const {
-  std::lock_guard<std::mutex> lock(m_);
-  return asks_;
+AsksBookMap
+LimitOrderBookSingleInstrument::getTopAsks(const std::size_t depth) const {
+  AsksBookMap result;
+  std::size_t copied = 0;
+  for (const auto &[price, quantity] : asks_) {
+    result.emplace(price, quantity);
+    if (++copied >= depth) {
+      break;
+    }
+  }
+  return result;
 }
 
 BestQuote LimitOrderBookSingleInstrument::getBestBid() const {
-  std::lock_guard<std::mutex> lock(m_);
   if (bids_.empty()) {
     return std::nullopt;
   }
@@ -139,16 +155,15 @@ BestQuote LimitOrderBookSingleInstrument::getBestBid() const {
 }
 
 BestQuote LimitOrderBookSingleInstrument::getBestAsk() const {
-  std::lock_guard<std::mutex> lock(m_);
   if (asks_.empty()) {
     return std::nullopt;
   }
   return *asks_.begin();
 }
 
-Quantity LimitOrderBookSingleInstrument::getVolumeAtPrice(const char side,
-                                                         const Price price) const {
-  std::lock_guard<std::mutex> lock(m_);
+Quantity
+LimitOrderBookSingleInstrument::getVolumeAtPrice(const char side,
+                                                 const Price price) const {
   if (side == 'B') {
     const auto it = bids_.find(price);
     return it == bids_.end() ? Quantity{0} : it->second;
@@ -161,12 +176,10 @@ Quantity LimitOrderBookSingleInstrument::getVolumeAtPrice(const char side,
 }
 
 ExecStats LimitOrderBookSingleInstrument::getTradeStats() const {
-  const std::lock_guard<std::mutex> lock(m_);
   return trade_stats_;
 }
 
 ExecStats LimitOrderBookSingleInstrument::getFillStats() const {
-  const std::lock_guard<std::mutex> lock(m_);
   return fill_stats_;
 }
 
@@ -205,4 +218,4 @@ void LimitOrderBookSingleInstrument::adjustLevel(const char side,
     adjust(asks_);
   }
 }
-} 
+} // namespace domain

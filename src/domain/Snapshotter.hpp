@@ -11,7 +11,6 @@
 
 namespace domain {
 
-
 struct InstrumentSnapshot {
   InstrumentId instrument_id;
   BidsBookMap bids;
@@ -19,7 +18,6 @@ struct InstrumentSnapshot {
   BestQuote best_bid;
   BestQuote best_ask;
 };
-
 
 struct LobSnapshot {
   std::size_t events_seen{};
@@ -34,13 +32,14 @@ public:
   using NanoDuration = std::uint64_t;
 
   Snapshotter(LimitOrderBook<QueueT> &limit_order_book,
-              NanoDuration interval_ns);
+              NanoDuration interval_ns, std::size_t depth = 5);
 
   void onEvent(const MarketDataEvent &event);
   void onEndEvents();
 
   const std::vector<LobSnapshot> &snapshots() const;
   NanoDuration intervalNs() const;
+  std::size_t depth() const;
   std::size_t eventsSeen() const;
 
   std::uint64_t firstEventTsNs() const;
@@ -52,10 +51,11 @@ private:
 
   LimitOrderBook<QueueT> &limit_order_book_;
   NanoDuration interval_ns_;
+  std::size_t depth_;
   std::optional<std::uint64_t> first_event_ts_ns_;
   std::optional<std::uint64_t> last_snapshot_ts_ns_;
   std::size_t events_seen_{0};
   std::vector<LobSnapshot> snapshots_;
 };
 
-}
+} // namespace domain

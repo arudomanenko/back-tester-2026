@@ -3,13 +3,10 @@
 #include "domain/LobsServingThread.hpp"
 
 #include <cstddef>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
 #include <unordered_map>
-#include <unordered_set>
-#include <utility>
 #include <vector>
 
 namespace domain {
@@ -17,10 +14,6 @@ using InstrumentIdToBidsBook = std::unordered_map<InstrumentId, BidsBookMap>;
 using InstrumentIdToAsksBook = std::unordered_map<InstrumentId, AsksBookMap>;
 using InstrumentIdToBestQuote = std::unordered_map<InstrumentId, BestQuote>;
 using InstrumentIdToExecStats = std::unordered_map<InstrumentId, ExecStats>;
-
-
-
-
 
 class LobConsistentView final {
 public:
@@ -48,14 +41,12 @@ public:
   void onEvent(const MarketDataEvent &event);
   void onEndEvent();
 
-
-
-
-
   LobConsistentView freeze();
 
   BidsBookMap getBids(InstrumentId instrument_id) const;
   AsksBookMap getAsks(InstrumentId instrument_id) const;
+  BidsBookMap getTopBids(InstrumentId instrument_id, std::size_t depth) const;
+  AsksBookMap getTopAsks(InstrumentId instrument_id, std::size_t depth) const;
   BestQuote getBestBid(InstrumentId instrument_id) const;
   BestQuote getBestAsk(InstrumentId instrument_id) const;
   Quantity getVolumeAtPrice(InstrumentId instrument_id, char side,
@@ -63,40 +54,43 @@ public:
 
   InstrumentIdToBidsBook getAllBids() const;
   InstrumentIdToAsksBook getAllAsks() const;
+  InstrumentIdToBidsBook getAllTopBids(std::size_t depth) const;
+  InstrumentIdToAsksBook getAllTopAsks(std::size_t depth) const;
   InstrumentIdToBestQuote getAllBestBids() const;
   InstrumentIdToBestQuote getAllBestAsks() const;
   InstrumentIdToExecStats getAllTradeStats() const;
   InstrumentIdToExecStats getAllFillStats() const;
+  std::size_t getActiveWorkersCount() const;
+  std::vector<std::size_t> getWorkerInstrumentLoads() const;
 
 private:
   using ThreadSptr = LobsServingThread::Sptr;
   using WorkThreadsHeap =
       std::priority_queue<ThreadSptr, std::vector<ThreadSptr>,
                           LobsServingThread::CompareByCapacity>;
+  struct InstrumentRoute {
+    LobSptr lob;
+    ThreadSptr thread;
+  };
 
   std::optional<InstrumentId>
   resolveInstrumentId(const MarketDataEvent &event) const;
-  void updateOrderRouting(const MarketDataEvent &event,
+  void rememberOrderRoute(const MarketDataEvent &event,
                           InstrumentId instrument_id);
-  void clearInstrumentOrders(InstrumentId instrument_id);
+  void clearInstrumentOrderRoutes(InstrumentId instrument_id);
 
-  void registerInstrument(InstrumentId instrument_id);
+  const InstrumentRoute &registerInstrument(InstrumentId instrument_id);
   ThreadSptr acquireLeastLoadedThread();
   LobSptr findLob(InstrumentId instrument_id) const;
 
   std::size_t max_work_threads_nums_;
 
-  InstrumentIdToLob instrument_to_lob_;
-  std::unordered_map<InstrumentId, ThreadSptr> instrument_id_to_thread_;
+  std::unordered_map<InstrumentId, LobSptr> instrument_to_lob_;
+  std::unordered_map<InstrumentId, InstrumentRoute> instrument_routes_;
   WorkThreadsHeap work_threads_;
 
   std::unordered_map<OrderId, InstrumentId> order_to_instrument_;
-  std::unordered_map<InstrumentId, std::unordered_set<OrderId>>
-      instrument_to_orders_;
-
-
-
 
   std::mutex freeze_m_;
 };
-}
+} // namespace domain

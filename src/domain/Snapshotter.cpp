@@ -4,32 +4,73 @@
 #include "transport/HierarchicalSyncedQueue.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <ostream>
 #include <set>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
 namespace domain {
 namespace {
 
+void printPrice(std::ostream &os, const Price price) {
+  const auto flags = os.flags();
+  const auto precision = os.precision();
+  os << std::fixed << std::setprecision(9) << price / 1'000'000'000.0;
+  os.flags(flags);
+  os.precision(precision);
+}
+
 void printBest(std::ostream &os, const BestQuote &q) {
   if (!q.has_value()) {
     os << "none";
   } else {
-    os << q->first << "x" << q->second;
+    printPrice(os, q->first);
+    os << "x" << q->second;
   }
 }
 
+template <typename BookT>
+void printLevels(std::ostream &os, const std::string_view name,
+                 const BookT &book) {
+  os << name << "=[";
+  bool first = true;
+  for (const auto &[price, quantity] : book) {
+    if (!first) {
+      os << ", ";
+    }
+    first = false;
+    printPrice(os, price);
+    os << "x" << quantity;
+  }
+  os << "]";
 }
 
+} // namespace
+
 std::ostream &operator<<(std::ostream &os, const LobSnapshot &snap) {
+  const auto non_empty =
+      std::count_if(snap.instruments.begin(), snap.instruments.end(),
+                    [](const InstrumentSnapshot &i) {
+                      return !i.bids.empty() || !i.asks.empty();
+                    });
   os << "  snapshot ts=" << snap.at_ts_event_ns
-     << " events=" << snap.events_seen << '\n';
+     << " events=" << snap.events_seen
+     << " instruments=" << snap.instruments.size() << " non_empty=" << non_empty
+     << " empty=" << snap.instruments.size() - non_empty << '\n';
   for (const auto &i : snap.instruments) {
+    if (i.bids.empty() && i.asks.empty()) {
+      continue;
+    }
     os << "    " << i.instrument_id << " bid=";
     printBest(os, i.best_bid);
     os << " ask=";
     printBest(os, i.best_ask);
+    os << " ";
+    printLevels(os, "bids", i.bids);
+    os << " ";
+    printLevels(os, "asks", i.asks);
     os << '\n';
   }
   return os;
@@ -37,8 +78,10 @@ std::ostream &operator<<(std::ostream &os, const LobSnapshot &snap) {
 
 template <typename QueueT>
 Snapshotter<QueueT>::Snapshotter(LimitOrderBook<QueueT> &limit_order_book,
-                                 const NanoDuration interval_ns)
-    : limit_order_book_(limit_order_book), interval_ns_(interval_ns) {}
+                                 const NanoDuration interval_ns,
+                                 const std::size_t depth)
+    : limit_order_book_(limit_order_book), interval_ns_(interval_ns),
+      depth_(depth) {}
 
 template <typename QueueT>
 void Snapshotter<QueueT>::onEvent(const MarketDataEvent &event) {
@@ -46,7 +89,6 @@ void Snapshotter<QueueT>::onEvent(const MarketDataEvent &event) {
   const auto ts = event.hd.ts_event;
 
   if (!last_snapshot_ts_ns_.has_value()) {
-
 
     first_event_ts_ns_ = ts;
     last_snapshot_ts_ns_ = ts;
@@ -76,6 +118,10 @@ Snapshotter<QueueT>::intervalNs() const {
   return interval_ns_;
 }
 
+template <typename QueueT> std::size_t Snapshotter<QueueT>::depth() const {
+  return depth_;
+}
+
 template <typename QueueT> std::size_t Snapshotter<QueueT>::eventsSeen() const {
   return events_seen_;
 }
@@ -87,8 +133,6 @@ std::uint64_t Snapshotter<QueueT>::firstEventTsNs() const {
 
 template <typename QueueT>
 void Snapshotter<QueueT>::printFinalBestQuotes(std::ostream &os) const {
-  // Safe to query the LOB directly: by the time main() calls this, the
-  // pipeline has been stopped, all worker threads joined, no freeze() needed.
   const auto best_bids = limit_order_book_.getAllBestBids();
   const auto best_asks = limit_order_book_.getAllBestAsks();
   std::set<InstrumentId> ids;
@@ -113,17 +157,14 @@ void Snapshotter<QueueT>::printFinalBestQuotes(std::ostream &os) const {
 template <typename QueueT>
 void Snapshotter<QueueT>::captureSnapshot(const std::uint64_t at_ts_event_ns) {
 
-
-
-
   auto view = limit_order_book_.freeze();
 
   LobSnapshot snap;
   snap.events_seen = events_seen_;
   snap.at_ts_event_ns = at_ts_event_ns;
 
-  const auto bids = limit_order_book_.getAllBids();
-  const auto asks = limit_order_book_.getAllAsks();
+  const auto bids = limit_order_book_.getAllTopBids(depth_);
+  const auto asks = limit_order_book_.getAllTopAsks(depth_);
   const auto best_bids = limit_order_book_.getAllBestBids();
   const auto best_asks = limit_order_book_.getAllBestAsks();
 
@@ -165,4 +206,4 @@ void Snapshotter<QueueT>::captureSnapshot(const std::uint64_t at_ts_event_ns) {
 template class Snapshotter<transport::FlatSyncedQueue>;
 template class Snapshotter<transport::HierarchicalSyncedQueue>;
 
-}
+} // namespace domain
